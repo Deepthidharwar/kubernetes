@@ -25,8 +25,8 @@ import (
 	"runtime"
 	"strings"
 
-	"k8s.io/klog"
-	"k8s.io/utils/mount"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 	utilstrings "k8s.io/utils/strings"
 
 	v1 "k8s.io/api/core/v1"
@@ -73,7 +73,7 @@ func (plugin *cephfsPlugin) CanSupport(spec *volume.Spec) bool {
 	return (spec.Volume != nil && spec.Volume.CephFS != nil) || (spec.PersistentVolume != nil && spec.PersistentVolume.Spec.CephFS != nil)
 }
 
-func (plugin *cephfsPlugin) RequiresRemount() bool {
+func (plugin *cephfsPlugin) RequiresRemount(spec *volume.Spec) bool {
 	return false
 }
 
@@ -189,7 +189,7 @@ type cephfs struct {
 	mon        []string
 	path       string
 	id         string
-	secret     string
+	secret     string `datapolicy:"token"`
 	secretFile string
 	readonly   bool
 	mounter    mount.Interface
@@ -300,25 +300,24 @@ func (cephfsVolume *cephfs) GetKeyringPath() string {
 
 func (cephfsVolume *cephfs) execMount(mountpoint string) error {
 	// cephfs mount option
-	cephOpt := ""
+	cephSensitiveOpt := []string{"name=" + cephfsVolume.id}
 	// override secretfile if secret is provided
 	if cephfsVolume.secret != "" {
-		cephOpt = "name=" + cephfsVolume.id + ",secret=" + cephfsVolume.secret
+		cephSensitiveOpt = append(cephSensitiveOpt, "secret="+cephfsVolume.secret)
 	} else {
-		cephOpt = "name=" + cephfsVolume.id + ",secretfile=" + cephfsVolume.secretFile
+		cephSensitiveOpt = append(cephSensitiveOpt, "secretfile="+cephfsVolume.secretFile)
 	}
 	// build option array
 	opt := []string{}
 	if cephfsVolume.readonly {
 		opt = append(opt, "ro")
 	}
-	opt = append(opt, cephOpt)
 
 	// build src like mon1:6789,mon2:6789,mon3:6789:/
 	src := strings.Join(cephfsVolume.mon, ",") + ":" + cephfsVolume.path
 
 	opt = util.JoinMountOptions(cephfsVolume.mountOptions, opt)
-	if err := cephfsVolume.mounter.Mount(src, mountpoint, "ceph", opt); err != nil {
+	if err := cephfsVolume.mounter.MountSensitive(src, mountpoint, "ceph", opt, cephSensitiveOpt); err != nil {
 		return fmt.Errorf("CephFS: mount failed: %v", err)
 	}
 

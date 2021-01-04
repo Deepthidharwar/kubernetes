@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	"k8s.io/kubernetes/test/e2e/framework/providers/gce"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
@@ -60,7 +61,7 @@ var _ = SIGDescribe("Multi-AZ Cluster Volumes [sig-storage]", func() {
 	})
 })
 
-// OnlyAllowNodeZones tests that GetAllCurrentZones returns only zones with Nodes
+// OnlyAllowNodeZones tests that PDs are only provisioned in zones with nodes.
 func OnlyAllowNodeZones(f *framework.Framework, zoneCount int, image string) {
 	gceCloud, err := gce.GetGCECloud()
 	framework.ExpectNoError(err)
@@ -82,7 +83,10 @@ func OnlyAllowNodeZones(f *framework.Framework, zoneCount int, image string) {
 			break
 		}
 	}
-	framework.ExpectNotEqual(extraZone, "", fmt.Sprintf("No extra zones available in region %s", region))
+
+	if extraZone == "" {
+		e2eskipper.Skipf("All zones in region %s have compute instances, no extra zones available", region)
+	}
 
 	ginkgo.By(fmt.Sprintf("starting a compute instance in unused zone: %v\n", extraZone))
 	project := framework.TestContext.CloudConfig.ProjectID
@@ -144,7 +148,7 @@ func OnlyAllowNodeZones(f *framework.Framework, zoneCount int, image string) {
 		// Defer the cleanup
 		defer func() {
 			framework.Logf("deleting claim %q/%q", pvc.Namespace, pvc.Name)
-			err = c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Delete(context.TODO(), pvc.Name, nil)
+			err = c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Delete(context.TODO(), pvc.Name, metav1.DeleteOptions{})
 			if err != nil {
 				framework.Failf("Error deleting claim %q. Error: %v", pvc.Name, err)
 			}
@@ -168,7 +172,7 @@ func OnlyAllowNodeZones(f *framework.Framework, zoneCount int, image string) {
 		pv, err := c.CoreV1().PersistentVolumes().Get(context.TODO(), claim.Spec.VolumeName, metav1.GetOptions{})
 		framework.ExpectNoError(err)
 
-		pvZone, ok := pv.ObjectMeta.Labels[v1.LabelZoneFailureDomain]
+		pvZone, ok := pv.ObjectMeta.Labels[v1.LabelFailureDomainBetaZone]
 		framework.ExpectEqual(ok, true, "PV has no LabelZone to be found")
 		pvZones.Insert(pvZone)
 	}
@@ -189,7 +193,7 @@ func PodsUseStaticPVsOrFail(f *framework.Framework, podCount int, image string) 
 	c := f.ClientSet
 	ns := f.Namespace.Name
 
-	zones, err := framework.GetClusterZones(c)
+	zones, err := e2enode.GetClusterZones(c)
 	framework.ExpectNoError(err)
 	zonelist := zones.List()
 	ginkgo.By("Creating static PVs across zones")
@@ -230,7 +234,7 @@ func PodsUseStaticPVsOrFail(f *framework.Framework, podCount int, image string) 
 
 	ginkgo.By("Waiting for all PVCs to be bound")
 	for _, config := range configs {
-		e2epv.WaitOnPVandPVC(c, ns, config.pv, config.pvc)
+		e2epv.WaitOnPVandPVC(c, f.Timeouts, ns, config.pv, config.pvc)
 	}
 
 	ginkgo.By("Creating pods for each static PV")

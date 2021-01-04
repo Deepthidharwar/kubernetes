@@ -146,33 +146,29 @@ var _ = SIGDescribe("Security Context", func() {
 		testPodSELinuxLabeling(f, false, true)
 	})
 
-	ginkgo.It("should support seccomp alpha unconfined annotation on the container [Feature:Seccomp] [LinuxOnly]", func() {
-		// TODO: port to SecurityContext as soon as seccomp is out of alpha
+	ginkgo.It("should support seccomp unconfined on the container [LinuxOnly]", func() {
 		pod := scTestPod(false, false)
-		pod.Annotations[v1.SeccompContainerAnnotationKeyPrefix+"test-container"] = "unconfined"
-		pod.Annotations[v1.SeccompPodAnnotationKey] = v1.SeccompProfileRuntimeDefault
+		pod.Spec.Containers[0].SecurityContext = &v1.SecurityContext{SeccompProfile: &v1.SeccompProfile{Type: v1.SeccompProfileTypeUnconfined}}
+		pod.Spec.SecurityContext = &v1.PodSecurityContext{SeccompProfile: &v1.SeccompProfile{Type: v1.SeccompProfileTypeRuntimeDefault}}
 		pod.Spec.Containers[0].Command = []string{"grep", "ecc", "/proc/self/status"}
 		f.TestContainerOutput(v1.SeccompPodAnnotationKey, pod, 0, []string{"0"}) // seccomp disabled
 	})
 
-	ginkgo.It("should support seccomp alpha unconfined annotation on the pod [Feature:Seccomp] [LinuxOnly]", func() {
-		// TODO: port to SecurityContext as soon as seccomp is out of alpha
+	ginkgo.It("should support seccomp unconfined on the pod [LinuxOnly]", func() {
 		pod := scTestPod(false, false)
-		pod.Annotations[v1.SeccompPodAnnotationKey] = "unconfined"
+		pod.Spec.SecurityContext = &v1.PodSecurityContext{SeccompProfile: &v1.SeccompProfile{Type: v1.SeccompProfileTypeUnconfined}}
 		pod.Spec.Containers[0].Command = []string{"grep", "ecc", "/proc/self/status"}
 		f.TestContainerOutput(v1.SeccompPodAnnotationKey, pod, 0, []string{"0"}) // seccomp disabled
 	})
 
-	ginkgo.It("should support seccomp alpha runtime/default annotation [Feature:Seccomp] [LinuxOnly]", func() {
-		// TODO: port to SecurityContext as soon as seccomp is out of alpha
+	ginkgo.It("should support seccomp runtime/default [LinuxOnly]", func() {
 		pod := scTestPod(false, false)
-		pod.Annotations[v1.SeccompContainerAnnotationKeyPrefix+"test-container"] = v1.SeccompProfileRuntimeDefault
+		pod.Spec.Containers[0].SecurityContext = &v1.SecurityContext{SeccompProfile: &v1.SeccompProfile{Type: v1.SeccompProfileTypeRuntimeDefault}}
 		pod.Spec.Containers[0].Command = []string{"grep", "ecc", "/proc/self/status"}
 		f.TestContainerOutput(v1.SeccompPodAnnotationKey, pod, 0, []string{"2"}) // seccomp filtered
 	})
 
-	ginkgo.It("should support seccomp default which is unconfined [Feature:Seccomp] [LinuxOnly]", func() {
-		// TODO: port to SecurityContext as soon as seccomp is out of alpha
+	ginkgo.It("should support seccomp default which is unconfined [LinuxOnly]", func() {
 		pod := scTestPod(false, false)
 		pod.Spec.Containers[0].Command = []string{"grep", "ecc", "/proc/self/status"}
 		f.TestContainerOutput(v1.SeccompPodAnnotationKey, pod, 0, []string{"0"}) // seccomp disabled
@@ -267,7 +263,7 @@ func testPodSELinuxLabeling(f *framework.Framework, hostIPC bool, hostPID bool) 
 	_, err = client.Create(context.TODO(), pod, metav1.CreateOptions{})
 	framework.ExpectNoError(err, "Error creating pod %v", pod)
 
-	err = f.WaitForPodRunning(pod.Name)
+	err = e2epod.WaitForPodNameRunningInNamespace(f.ClientSet, pod.Name, f.Namespace.Name)
 	framework.ExpectNoError(err, "Error waiting for pod to run %v", pod)
 
 	// for this to work, SELinux should be in enforcing mode, so let's check that

@@ -50,7 +50,7 @@ import (
 	"k8s.io/kubernetes/test/integration/framework"
 
 	// install all APIs
-	_ "k8s.io/kubernetes/pkg/master"
+	_ "k8s.io/kubernetes/pkg/controlplane"
 )
 
 // StartRealMasterOrDie starts an API master that is appropriate for use in tests that require one of every resource
@@ -65,13 +65,12 @@ func StartRealMasterOrDie(t *testing.T, configFuncs ...func(*options.ServerRunOp
 		t.Fatal(err)
 	}
 
-	listener, _, err := genericapiserveroptions.CreateListener("tcp", "127.0.0.1:0")
+	listener, _, err := genericapiserveroptions.CreateListener("tcp", "127.0.0.1:0", net.ListenConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	kubeAPIServerOptions := options.NewServerRunOptions()
-	kubeAPIServerOptions.InsecureServing.BindPort = 0
 	kubeAPIServerOptions.SecureServing.Listener = listener
 	kubeAPIServerOptions.SecureServing.ServerCert.CertDirectory = certDir
 	kubeAPIServerOptions.Etcd.StorageConfig.Transport.ServerList = []string{framework.GetEtcdURL()}

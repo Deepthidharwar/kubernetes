@@ -45,31 +45,32 @@ import (
 	"k8s.io/client-go/metadata/metadatainformer"
 	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/controller-manager/pkg/informerfactory"
 	kubeapiservertesting "k8s.io/kubernetes/cmd/kube-apiserver/app/testing"
-	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/garbagecollector"
 	"k8s.io/kubernetes/test/integration"
 	"k8s.io/kubernetes/test/integration/framework"
+	"k8s.io/utils/pointer"
 )
 
-func getForegroundOptions() *metav1.DeleteOptions {
+func getForegroundOptions() metav1.DeleteOptions {
 	policy := metav1.DeletePropagationForeground
-	return &metav1.DeleteOptions{PropagationPolicy: &policy}
+	return metav1.DeleteOptions{PropagationPolicy: &policy}
 }
 
-func getOrphanOptions() *metav1.DeleteOptions {
+func getOrphanOptions() metav1.DeleteOptions {
 	var trueVar = true
-	return &metav1.DeleteOptions{OrphanDependents: &trueVar}
+	return metav1.DeleteOptions{OrphanDependents: &trueVar}
 }
 
-func getPropagateOrphanOptions() *metav1.DeleteOptions {
+func getPropagateOrphanOptions() metav1.DeleteOptions {
 	policy := metav1.DeletePropagationOrphan
-	return &metav1.DeleteOptions{PropagationPolicy: &policy}
+	return metav1.DeleteOptions{PropagationPolicy: &policy}
 }
 
-func getNonOrphanOptions() *metav1.DeleteOptions {
+func getNonOrphanOptions() metav1.DeleteOptions {
 	var falseVar = false
-	return &metav1.DeleteOptions{OrphanDependents: &falseVar}
+	return metav1.DeleteOptions{OrphanDependents: &falseVar}
 }
 
 const garbageCollectedPodName = "test.pod.1"
@@ -232,7 +233,6 @@ func setupWithServer(t *testing.T, result *kubeapiservertesting.TestServer, work
 	discoveryClient := cacheddiscovery.NewMemCacheClient(clientSet.Discovery())
 	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(discoveryClient)
 	restMapper.Reset()
-	deletableResources := garbagecollector.GetDeletableResources(discoveryClient)
 	config := *result.ClientConfig
 	metadataClient, err := metadata.NewForConfig(&config)
 	if err != nil {
@@ -247,11 +247,11 @@ func setupWithServer(t *testing.T, result *kubeapiservertesting.TestServer, work
 	alwaysStarted := make(chan struct{})
 	close(alwaysStarted)
 	gc, err := garbagecollector.NewGarbageCollector(
+		clientSet,
 		metadataClient,
 		restMapper,
-		deletableResources,
 		garbagecollector.DefaultIgnoredResources(),
-		controller.NewInformerFactory(sharedInformers, metadataInformers),
+		informerfactory.NewInformerFactory(sharedInformers, metadataInformers),
 		alwaysStarted,
 	)
 	if err != nil {
@@ -310,9 +310,146 @@ func createNamespaceOrDie(name string, c clientset.Interface, t *testing.T) *v1.
 func deleteNamespaceOrDie(name string, c clientset.Interface, t *testing.T) {
 	zero := int64(0)
 	background := metav1.DeletePropagationBackground
-	err := c.CoreV1().Namespaces().Delete(context.TODO(), name, &metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background})
+	err := c.CoreV1().Namespaces().Delete(context.TODO(), name, metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background})
 	if err != nil {
 		t.Fatalf("failed to delete namespace %q: %v", name, err)
+	}
+}
+
+func TestCrossNamespaceReferencesWithWatchCache(t *testing.T) {
+	testCrossNamespaceReferences(t, true)
+}
+func TestCrossNamespaceReferencesWithoutWatchCache(t *testing.T) {
+	testCrossNamespaceReferences(t, false)
+}
+
+func testCrossNamespaceReferences(t *testing.T, watchCache bool) {
+	var (
+		workers            = 5
+		validChildrenCount = 10
+		namespaceB         = "b"
+		namespaceA         = "a"
+	)
+
+	// Start the server
+	testServer := kubeapiservertesting.StartTestServerOrDie(t, nil, []string{fmt.Sprintf("--watch-cache=%v", watchCache)}, framework.SharedEtcd())
+	defer func() {
+		if testServer != nil {
+			testServer.TearDownFn()
+		}
+	}()
+	clientSet, err := clientset.NewForConfig(testServer.ClientConfig)
+	if err != nil {
+		t.Fatalf("error creating clientset: %v", err)
+	}
+
+	createNamespaceOrDie(namespaceB, clientSet, t)
+	parent, err := clientSet.CoreV1().ConfigMaps(namespaceB).Create(context.TODO(), &v1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "parent"}}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < validChildrenCount; i++ {
+		_, err := clientSet.CoreV1().Secrets(namespaceB).Create(context.TODO(), &v1.Secret{ObjectMeta: metav1.ObjectMeta{GenerateName: "child-", OwnerReferences: []metav1.OwnerReference{
+			{Name: "parent", Kind: "ConfigMap", APIVersion: "v1", UID: parent.UID, Controller: pointer.BoolPtr(false)},
+		}}}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	createNamespaceOrDie(namespaceA, clientSet, t)
+
+	// Construct invalid owner references:
+	invalidOwnerReferences := []metav1.OwnerReference{}
+	for i := 0; i < 25; i++ {
+		invalidOwnerReferences = append(invalidOwnerReferences, metav1.OwnerReference{Name: "invalid", UID: types.UID(fmt.Sprintf("invalid-%d", i)), APIVersion: "test/v1", Kind: fmt.Sprintf("invalid%d", i)})
+	}
+	invalidOwnerReferences = append(invalidOwnerReferences, metav1.OwnerReference{Name: "invalid", UID: parent.UID, APIVersion: "v1", Kind: "Pod", Controller: pointer.BoolPtr(false)})
+
+	invalidUIDs := []types.UID{}
+	for i := 0; i < workers; i++ {
+		invalidChildType1, err := clientSet.CoreV1().ConfigMaps(namespaceA).Create(context.TODO(), &v1.ConfigMap{ObjectMeta: metav1.ObjectMeta{GenerateName: "invalid-child-", OwnerReferences: invalidOwnerReferences}}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		invalidChildType2, err := clientSet.CoreV1().Secrets(namespaceA).Create(context.TODO(), &v1.Secret{ObjectMeta: metav1.ObjectMeta{GenerateName: "invalid-child-a-", OwnerReferences: invalidOwnerReferences}}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		invalidChildType3, err := clientSet.CoreV1().Secrets(namespaceA).Create(context.TODO(), &v1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels:          map[string]string{"single-bad-reference": "true"},
+				GenerateName:    "invalid-child-b-",
+				OwnerReferences: []metav1.OwnerReference{{Name: "invalid", UID: parent.UID, APIVersion: "v1", Kind: "Pod", Controller: pointer.BoolPtr(false)}},
+			},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		invalidUIDs = append(invalidUIDs, invalidChildType1.UID, invalidChildType2.UID, invalidChildType3.UID)
+	}
+
+	// start GC with existing objects in place to simulate controller-manager restart
+	ctx := setupWithServer(t, testServer, workers)
+	defer ctx.tearDown()
+	testServer = nil
+
+	// Wait for the invalid children to be garbage collected
+	if err := wait.PollImmediate(time.Second, 10*time.Second, func() (bool, error) {
+		children, err := clientSet.CoreV1().Secrets(namespaceA).List(context.TODO(), metav1.ListOptions{LabelSelector: "single-bad-reference=true"})
+		if err != nil {
+			return false, err
+		}
+		if len(children.Items) > 0 {
+			t.Logf("expected 0 invalid children, got %d, will wait and relist", len(children.Items))
+			return false, nil
+		}
+		return true, nil
+	}); err != nil && err != wait.ErrWaitTimeout {
+		t.Error(err)
+	}
+
+	// Wait for a little while to make sure they didn't trigger deletion of the valid children
+	if err := wait.Poll(time.Second, 5*time.Second, func() (bool, error) {
+		children, err := clientSet.CoreV1().Secrets(namespaceB).List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			return false, err
+		}
+		if len(children.Items) != validChildrenCount {
+			return false, fmt.Errorf("expected %d valid children, got %d", validChildrenCount, len(children.Items))
+		}
+		return false, nil
+	}); err != nil && err != wait.ErrWaitTimeout {
+		t.Error(err)
+	}
+
+	if !ctx.gc.GraphHasUID(parent.UID) {
+		t.Errorf("valid parent UID no longer exists in the graph")
+	}
+
+	// Now that our graph has correct data in it, add a new invalid child and see if it gets deleted
+	invalidChild, err := clientSet.CoreV1().Secrets(namespaceA).Create(context.TODO(), &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName:    "invalid-child-c-",
+			OwnerReferences: []metav1.OwnerReference{{Name: "invalid", UID: parent.UID, APIVersion: "v1", Kind: "Pod", Controller: pointer.BoolPtr(false)}},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Wait for the invalid child to be garbage collected
+	if err := wait.PollImmediate(time.Second, 10*time.Second, func() (bool, error) {
+		_, err := clientSet.CoreV1().Secrets(namespaceA).Get(context.TODO(), invalidChild.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		t.Logf("%s remains, waiting for deletion", invalidChild.Name)
+		return false, nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -435,7 +572,7 @@ func TestCreateWithNonExistentOwner(t *testing.T) {
 	}
 }
 
-func setupRCsPods(t *testing.T, gc *garbagecollector.GarbageCollector, clientSet clientset.Interface, nameSuffix, namespace string, initialFinalizers []string, options *metav1.DeleteOptions, wg *sync.WaitGroup, rcUIDs chan types.UID) {
+func setupRCsPods(t *testing.T, gc *garbagecollector.GarbageCollector, clientSet clientset.Interface, nameSuffix, namespace string, initialFinalizers []string, options metav1.DeleteOptions, wg *sync.WaitGroup, rcUIDs chan types.UID) {
 	defer wg.Done()
 	rcClient := clientSet.CoreV1().ReplicationControllers(namespace)
 	podClient := clientSet.CoreV1().Pods(namespace)
@@ -461,7 +598,7 @@ func setupRCsPods(t *testing.T, gc *garbagecollector.GarbageCollector, clientSet
 	}
 	orphan := false
 	switch {
-	case options == nil:
+	case options.OrphanDependents == nil && options.PropagationPolicy == nil && len(initialFinalizers) == 0:
 		// if there are no deletion options, the default policy for replication controllers is orphan
 		orphan = true
 	case options.OrphanDependents != nil:
@@ -537,9 +674,9 @@ func TestStressingCascadingDeletion(t *testing.T) {
 	rcUIDs := make(chan types.UID, collections*5)
 	for i := 0; i < collections; i++ {
 		// rc is created with empty finalizers, deleted with nil delete options, pods will remain.
-		go setupRCsPods(t, gc, clientSet, "collection1-"+strconv.Itoa(i), ns.Name, []string{}, nil, &wg, rcUIDs)
+		go setupRCsPods(t, gc, clientSet, "collection1-"+strconv.Itoa(i), ns.Name, []string{}, metav1.DeleteOptions{}, &wg, rcUIDs)
 		// rc is created with the orphan finalizer, deleted with nil options, pods will remain.
-		go setupRCsPods(t, gc, clientSet, "collection2-"+strconv.Itoa(i), ns.Name, []string{metav1.FinalizerOrphanDependents}, nil, &wg, rcUIDs)
+		go setupRCsPods(t, gc, clientSet, "collection2-"+strconv.Itoa(i), ns.Name, []string{metav1.FinalizerOrphanDependents}, metav1.DeleteOptions{}, &wg, rcUIDs)
 		// rc is created with the orphan finalizer, deleted with DeleteOptions.OrphanDependents=false, pods will be deleted.
 		go setupRCsPods(t, gc, clientSet, "collection3-"+strconv.Itoa(i), ns.Name, []string{metav1.FinalizerOrphanDependents}, getNonOrphanOptions(), &wg, rcUIDs)
 		// rc is created with empty finalizers, deleted with DeleteOptions.OrphanDependents=true, pods will remain.
@@ -925,7 +1062,7 @@ func TestCustomResourceCascadingDeletion(t *testing.T) {
 
 	// Create a custom owner resource.
 	owner := newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("owner"))
-	owner, err := resourceClient.Create(owner, metav1.CreateOptions{})
+	owner, err := resourceClient.Create(context.TODO(), owner, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("failed to create owner resource %q: %v", owner.GetName(), err)
 	}
@@ -935,7 +1072,7 @@ func TestCustomResourceCascadingDeletion(t *testing.T) {
 	dependent := newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("dependent"))
 	link(t, owner, dependent)
 
-	dependent, err = resourceClient.Create(dependent, metav1.CreateOptions{})
+	dependent, err = resourceClient.Create(context.TODO(), dependent, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("failed to create dependent resource %q: %v", dependent.GetName(), err)
 	}
@@ -943,21 +1080,21 @@ func TestCustomResourceCascadingDeletion(t *testing.T) {
 
 	// Delete the owner.
 	foreground := metav1.DeletePropagationForeground
-	err = resourceClient.Delete(owner.GetName(), &metav1.DeleteOptions{PropagationPolicy: &foreground})
+	err = resourceClient.Delete(context.TODO(), owner.GetName(), metav1.DeleteOptions{PropagationPolicy: &foreground})
 	if err != nil {
 		t.Fatalf("failed to delete owner resource %q: %v", owner.GetName(), err)
 	}
 
 	// Ensure the owner is deleted.
 	if err := wait.Poll(1*time.Second, 60*time.Second, func() (bool, error) {
-		_, err := resourceClient.Get(owner.GetName(), metav1.GetOptions{})
+		_, err := resourceClient.Get(context.TODO(), owner.GetName(), metav1.GetOptions{})
 		return apierrors.IsNotFound(err), nil
 	}); err != nil {
 		t.Fatalf("failed waiting for owner resource %q to be deleted", owner.GetName())
 	}
 
 	// Ensure the dependent is deleted.
-	_, err = resourceClient.Get(dependent.GetName(), metav1.GetOptions{})
+	_, err = resourceClient.Get(context.TODO(), dependent.GetName(), metav1.GetOptions{})
 	if err == nil {
 		t.Fatalf("expected dependent %q to be deleted", dependent.GetName())
 	} else {
@@ -986,7 +1123,7 @@ func TestMixedRelationships(t *testing.T) {
 	definition, resourceClient := createRandomCustomResourceDefinition(t, apiExtensionClient, dynamicClient, ns.Name)
 
 	// Create a custom owner resource.
-	customOwner, err := resourceClient.Create(newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("owner")), metav1.CreateOptions{})
+	customOwner, err := resourceClient.Create(context.TODO(), newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("owner")), metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("failed to create owner: %v", err)
 	}
@@ -1013,7 +1150,7 @@ func TestMixedRelationships(t *testing.T) {
 	coreOwner.TypeMeta.Kind = "ConfigMap"
 	coreOwner.TypeMeta.APIVersion = "v1"
 	link(t, coreOwner, customDependent)
-	customDependent, err = resourceClient.Create(customDependent, metav1.CreateOptions{})
+	customDependent, err = resourceClient.Create(context.TODO(), customDependent, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("failed to create dependent: %v", err)
 	}
@@ -1021,21 +1158,21 @@ func TestMixedRelationships(t *testing.T) {
 
 	// Delete the custom owner.
 	foreground := metav1.DeletePropagationForeground
-	err = resourceClient.Delete(customOwner.GetName(), &metav1.DeleteOptions{PropagationPolicy: &foreground})
+	err = resourceClient.Delete(context.TODO(), customOwner.GetName(), metav1.DeleteOptions{PropagationPolicy: &foreground})
 	if err != nil {
 		t.Fatalf("failed to delete owner resource %q: %v", customOwner.GetName(), err)
 	}
 
 	// Ensure the owner is deleted.
 	if err := wait.Poll(1*time.Second, 60*time.Second, func() (bool, error) {
-		_, err := resourceClient.Get(customOwner.GetName(), metav1.GetOptions{})
+		_, err := resourceClient.Get(context.TODO(), customOwner.GetName(), metav1.GetOptions{})
 		return apierrors.IsNotFound(err), nil
 	}); err != nil {
 		t.Fatalf("failed waiting for owner resource %q to be deleted", customOwner.GetName())
 	}
 
 	// Ensure the dependent is deleted.
-	_, err = resourceClient.Get(coreDependent.GetName(), metav1.GetOptions{})
+	_, err = resourceClient.Get(context.TODO(), coreDependent.GetName(), metav1.GetOptions{})
 	if err == nil {
 		t.Fatalf("expected dependent %q to be deleted", coreDependent.GetName())
 	} else {
@@ -1045,7 +1182,7 @@ func TestMixedRelationships(t *testing.T) {
 	}
 
 	// Delete the core owner.
-	err = configMapClient.Delete(context.TODO(), coreOwner.GetName(), &metav1.DeleteOptions{PropagationPolicy: &foreground})
+	err = configMapClient.Delete(context.TODO(), coreOwner.GetName(), metav1.DeleteOptions{PropagationPolicy: &foreground})
 	if err != nil {
 		t.Fatalf("failed to delete owner resource %q: %v", coreOwner.GetName(), err)
 	}
@@ -1059,7 +1196,7 @@ func TestMixedRelationships(t *testing.T) {
 	}
 
 	// Ensure the dependent is deleted.
-	_, err = resourceClient.Get(customDependent.GetName(), metav1.GetOptions{})
+	_, err = resourceClient.Get(context.TODO(), customDependent.GetName(), metav1.GetOptions{})
 	if err == nil {
 		t.Fatalf("expected dependent %q to be deleted", customDependent.GetName())
 	} else {
@@ -1099,7 +1236,7 @@ func testCRDDeletion(t *testing.T, ctx *testContext, ns *v1.Namespace, definitio
 	configMapClient := clientSet.CoreV1().ConfigMaps(ns.Name)
 
 	// Create a custom owner resource.
-	owner, err := resourceClient.Create(newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("owner")), metav1.CreateOptions{})
+	owner, err := resourceClient.Create(context.TODO(), newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("owner")), metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("failed to create owner: %v", err)
 	}
@@ -1123,7 +1260,7 @@ func testCRDDeletion(t *testing.T, ctx *testContext, ns *v1.Namespace, definitio
 
 	// Ensure the owner is deleted.
 	if err := wait.Poll(1*time.Second, 60*time.Second, func() (bool, error) {
-		_, err := resourceClient.Get(owner.GetName(), metav1.GetOptions{})
+		_, err := resourceClient.Get(context.TODO(), owner.GetName(), metav1.GetOptions{})
 		return apierrors.IsNotFound(err), nil
 	}); err != nil {
 		t.Fatalf("failed waiting for owner %q to be deleted", owner.GetName())

@@ -99,7 +99,7 @@ func doEtcdFailure(failCommand, fixCommand string) {
 }
 
 func masterExec(cmd string) {
-	host := framework.GetMasterHost() + ":22"
+	host := framework.APIAddress() + ":22"
 	result, err := e2essh.SSH(cmd, host, framework.TestContext.Provider)
 	framework.ExpectNoError(err, "failed to SSH to host %s on provider %s and run command: %q", host, framework.TestContext.Provider, cmd)
 	if result.Code != 0 {
@@ -125,7 +125,7 @@ func checkExistingRCRecovers(f *framework.Framework) {
 			return false, nil
 		}
 		for _, pod := range pods.Items {
-			err = podClient.Delete(context.TODO(), pod.Name, metav1.NewDeleteOptions(0))
+			err = podClient.Delete(context.TODO(), pod.Name, *metav1.NewDeleteOptions(0))
 			framework.ExpectNoError(err, "failed to delete pod %s in namespace: %s", pod.Name, f.Namespace.Name)
 		}
 		framework.Logf("apiserver has recovered")

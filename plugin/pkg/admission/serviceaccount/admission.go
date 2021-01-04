@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/admission"
 	genericadmissioninitializer "k8s.io/apiserver/pkg/admission/initializer"
+	apiserverserviceaccount "k8s.io/apiserver/pkg/authentication/serviceaccount"
 	"k8s.io/apiserver/pkg/storage/names"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -216,7 +217,7 @@ func (s *Plugin) Validate(ctx context.Context, a admission.Attributes, o admissi
 		podutil.VisitPodSecretNames(pod, func(name string) bool {
 			hasSecrets = true
 			return false
-		})
+		}, podutil.AllContainers)
 		if hasSecrets {
 			return admission.NewForbidden(a, fmt.Errorf("a mirror pod may not reference secrets"))
 		}
@@ -366,7 +367,7 @@ func (s *Plugin) getServiceAccountTokens(serviceAccount *corev1.ServiceAccount) 
 			continue
 		}
 
-		if serviceaccount.IsServiceAccountToken(secret, serviceAccount) {
+		if apiserverserviceaccount.IsServiceAccountToken(secret, serviceAccount) {
 			tokens = append(tokens, secret)
 		}
 	}
@@ -467,9 +468,10 @@ func (s *Plugin) mountServiceAccountToken(serviceAccount *corev1.ServiceAccount,
 			tokenVolumeName = s.generateName(ServiceAccountVolumeName + "-")
 		} else {
 			// Try naming the volume the same as the serviceAccountToken, and uniquify if needed
-			tokenVolumeName = serviceAccountToken
+			// Replace dots because volumeMountName can't contain it
+			tokenVolumeName = strings.Replace(serviceAccountToken, ".", "-", -1)
 			if allVolumeNames.Has(tokenVolumeName) {
-				tokenVolumeName = s.generateName(fmt.Sprintf("%s-", serviceAccountToken))
+				tokenVolumeName = s.generateName(fmt.Sprintf("%s-", tokenVolumeName))
 			}
 		}
 	}
@@ -524,42 +526,7 @@ func (s *Plugin) createVolume(tokenVolumeName, secretName string) api.Volume {
 		return api.Volume{
 			Name: tokenVolumeName,
 			VolumeSource: api.VolumeSource{
-				Projected: &api.ProjectedVolumeSource{
-					Sources: []api.VolumeProjection{
-						{
-							ServiceAccountToken: &api.ServiceAccountTokenProjection{
-								Path:              "token",
-								ExpirationSeconds: 60 * 60,
-							},
-						},
-						{
-							ConfigMap: &api.ConfigMapProjection{
-								LocalObjectReference: api.LocalObjectReference{
-									Name: "kube-root-ca.crt",
-								},
-								Items: []api.KeyToPath{
-									{
-										Key:  "ca.crt",
-										Path: "ca.crt",
-									},
-								},
-							},
-						},
-						{
-							DownwardAPI: &api.DownwardAPIProjection{
-								Items: []api.DownwardAPIVolumeFile{
-									{
-										Path: "namespace",
-										FieldRef: &api.ObjectFieldSelector{
-											APIVersion: "v1",
-											FieldPath:  "metadata.namespace",
-										},
-									},
-								},
-							},
-						},
-					},
-				},
+				Projected: TokenVolumeSource(),
 			},
 		}
 	}
@@ -568,6 +535,46 @@ func (s *Plugin) createVolume(tokenVolumeName, secretName string) api.Volume {
 		VolumeSource: api.VolumeSource{
 			Secret: &api.SecretVolumeSource{
 				SecretName: secretName,
+			},
+		},
+	}
+}
+
+// TokenVolumeSource returns the projected volume source for service account token.
+func TokenVolumeSource() *api.ProjectedVolumeSource {
+	return &api.ProjectedVolumeSource{
+		Sources: []api.VolumeProjection{
+			{
+				ServiceAccountToken: &api.ServiceAccountTokenProjection{
+					Path:              "token",
+					ExpirationSeconds: serviceaccount.WarnOnlyBoundTokenExpirationSeconds,
+				},
+			},
+			{
+				ConfigMap: &api.ConfigMapProjection{
+					LocalObjectReference: api.LocalObjectReference{
+						Name: "kube-root-ca.crt",
+					},
+					Items: []api.KeyToPath{
+						{
+							Key:  "ca.crt",
+							Path: "ca.crt",
+						},
+					},
+				},
+			},
+			{
+				DownwardAPI: &api.DownwardAPIProjection{
+					Items: []api.DownwardAPIVolumeFile{
+						{
+							Path: "namespace",
+							FieldRef: &api.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "metadata.namespace",
+							},
+						},
+					},
+				},
 			},
 		},
 	}

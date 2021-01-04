@@ -22,7 +22,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/utils/mount"
+	"k8s.io/mount-utils"
 )
 
 // UniquePodName defines the type to key pods off of
@@ -52,6 +52,28 @@ func (o *GeneratedOperations) Run() (eventErr, detailedErr error) {
 	// Handle panic, if any, from operationFunc()
 	defer runtime.RecoverFromPanic(&detailedErr)
 	return o.OperationFunc()
+}
+
+// FailedPrecondition error indicates CSI operation returned failed precondition
+// error
+type FailedPrecondition struct {
+	msg string
+}
+
+func (err *FailedPrecondition) Error() string {
+	return err.msg
+}
+
+// NewFailedPreconditionError returns a new FailedPrecondition error instance
+func NewFailedPreconditionError(msg string) *FailedPrecondition {
+	return &FailedPrecondition{msg: msg}
+}
+
+// IsFailedPreconditionError checks if given error is of type that indicates
+// operation failed with precondition
+func IsFailedPreconditionError(err error) bool {
+	var failedPreconditionError *FailedPrecondition
+	return errors.As(err, &failedPreconditionError)
 }
 
 // TransientOperationFailure indicates operation failed with a transient error
@@ -99,7 +121,7 @@ func IsOperationFinishedError(err error) bool {
 // IsFilesystemMismatchError checks if mount failed because requested filesystem
 // on PVC and actual filesystem on disk did not match
 func IsFilesystemMismatchError(err error) bool {
-	mountError := &mount.MountError{}
+	mountError := mount.MountError{}
 	if errors.As(err, &mountError) && mountError.Type == mount.FilesystemMismatch {
 		return true
 	}

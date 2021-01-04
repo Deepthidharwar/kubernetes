@@ -43,7 +43,7 @@ import (
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
-	e2esset "k8s.io/kubernetes/test/e2e/framework/statefulset"
+	e2estatefulset "k8s.io/kubernetes/test/e2e/framework/statefulset"
 	testutils "k8s.io/kubernetes/test/utils"
 
 	"github.com/onsi/ginkgo"
@@ -123,7 +123,7 @@ var _ = SIGDescribe("Network Partition [Disruptive] [Slow]", func() {
 
 		// TODO(foxish): Re-enable testing on gce after kubernetes#56787 is fixed.
 		e2eskipper.SkipUnlessProviderIs("gke", "aws")
-		if strings.Index(framework.TestContext.CloudConfig.NodeInstanceGroup, ",") >= 0 {
+		if strings.Contains(framework.TestContext.CloudConfig.NodeInstanceGroup, ",") {
 			framework.Failf("Test dose not support cluster setup with more than one MIG: %s", framework.TestContext.CloudConfig.NodeInstanceGroup)
 		}
 	})
@@ -204,14 +204,14 @@ var _ = SIGDescribe("Network Partition [Disruptive] [Slow]", func() {
 				}()
 				go controller.Run(stopCh)
 
-				ginkgo.By(fmt.Sprintf("Block traffic from node %s to the master", node.Name))
+				ginkgo.By(fmt.Sprintf("Block traffic from node %s to the control plane", node.Name))
 				host, err := e2enode.GetExternalIP(&node)
 				framework.ExpectNoError(err)
-				masterAddresses := framework.GetAllMasterAddresses(c)
+				controlPlaneAddresses := framework.GetControlPlaneAddresses(c)
 				defer func() {
-					ginkgo.By(fmt.Sprintf("Unblock traffic from node %s to the master", node.Name))
-					for _, masterAddress := range masterAddresses {
-						framework.UnblockNetwork(host, masterAddress)
+					ginkgo.By(fmt.Sprintf("Unblock traffic from node %s to the control plane", node.Name))
+					for _, instanceAddress := range controlPlaneAddresses {
+						e2enetwork.UnblockNetwork(host, instanceAddress)
 					}
 
 					if ginkgo.CurrentGinkgoTestDescription().Failed {
@@ -225,8 +225,8 @@ var _ = SIGDescribe("Network Partition [Disruptive] [Slow]", func() {
 					}
 				}()
 
-				for _, masterAddress := range masterAddresses {
-					framework.BlockNetwork(host, masterAddress)
+				for _, instanceAddress := range controlPlaneAddresses {
+					e2enetwork.BlockNetwork(host, instanceAddress)
 				}
 
 				ginkgo.By("Expect to observe node and pod status change from Ready to NotReady after network partition")
@@ -379,13 +379,13 @@ var _ = SIGDescribe("Network Partition [Disruptive] [Slow]", func() {
 				framework.DumpDebugInfo(c, ns)
 			}
 			framework.Logf("Deleting all stateful set in ns %v", ns)
-			e2esset.DeleteAllStatefulSets(c, ns)
+			e2estatefulset.DeleteAllStatefulSets(c, ns)
 		})
 
 		ginkgo.It("should come back up if node goes down [Slow] [Disruptive]", func() {
 			petMounts := []v1.VolumeMount{{Name: "datadir", MountPath: "/data/"}}
 			podMounts := []v1.VolumeMount{{Name: "home", MountPath: "/home"}}
-			ps := e2esset.NewStatefulSet(psName, ns, headlessSvcName, 3, petMounts, podMounts, labels)
+			ps := e2estatefulset.NewStatefulSet(psName, ns, headlessSvcName, 3, petMounts, podMounts, labels)
 			_, err := c.AppsV1().StatefulSets(ns).Create(context.TODO(), ps, metav1.CreateOptions{})
 			framework.ExpectNoError(err)
 
@@ -396,19 +396,19 @@ var _ = SIGDescribe("Network Partition [Disruptive] [Slow]", func() {
 			common.RestartNodes(f.ClientSet, nodes)
 
 			ginkgo.By("waiting for pods to be running again")
-			e2esset.WaitForRunningAndReady(c, *ps.Spec.Replicas, ps)
+			e2estatefulset.WaitForRunningAndReady(c, *ps.Spec.Replicas, ps)
 		})
 
 		ginkgo.It("should not reschedule stateful pods if there is a network partition [Slow] [Disruptive]", func() {
 			e2eskipper.SkipUnlessSSHKeyPresent()
 
-			ps := e2esset.NewStatefulSet(psName, ns, headlessSvcName, 3, []v1.VolumeMount{}, []v1.VolumeMount{}, labels)
+			ps := e2estatefulset.NewStatefulSet(psName, ns, headlessSvcName, 3, []v1.VolumeMount{}, []v1.VolumeMount{}, labels)
 			_, err := c.AppsV1().StatefulSets(ns).Create(context.TODO(), ps, metav1.CreateOptions{})
 			framework.ExpectNoError(err)
 
-			e2esset.WaitForRunningAndReady(c, *ps.Spec.Replicas, ps)
+			e2estatefulset.WaitForRunningAndReady(c, *ps.Spec.Replicas, ps)
 
-			pod := e2esset.GetPodList(c, ps).Items[0]
+			pod := e2estatefulset.GetPodList(c, ps).Items[0]
 			node, err := c.CoreV1().Nodes().Get(context.TODO(), pod.Spec.NodeName, metav1.GetOptions{})
 			framework.ExpectNoError(err)
 
@@ -427,7 +427,7 @@ var _ = SIGDescribe("Network Partition [Disruptive] [Slow]", func() {
 			}
 
 			ginkgo.By("waiting for pods to be running again")
-			e2esset.WaitForRunningAndReady(c, *ps.Spec.Replicas, ps)
+			e2estatefulset.WaitForRunningAndReady(c, *ps.Spec.Replicas, ps)
 		})
 	})
 
@@ -592,14 +592,14 @@ var _ = SIGDescribe("Network Partition [Disruptive] [Slow]", func() {
 				}()
 				go controller.Run(stopCh)
 
-				ginkgo.By(fmt.Sprintf("Block traffic from node %s to the master", node.Name))
+				ginkgo.By(fmt.Sprintf("Block traffic from node %s to the control plane", node.Name))
 				host, err := e2enode.GetExternalIP(&node)
 				framework.ExpectNoError(err)
-				masterAddresses := framework.GetAllMasterAddresses(c)
+				controlPlaneAddresses := framework.GetControlPlaneAddresses(c)
 				defer func() {
-					ginkgo.By(fmt.Sprintf("Unblock traffic from node %s to the master", node.Name))
-					for _, masterAddress := range masterAddresses {
-						framework.UnblockNetwork(host, masterAddress)
+					ginkgo.By(fmt.Sprintf("Unblock traffic from node %s to the control plane", node.Name))
+					for _, instanceAddress := range controlPlaneAddresses {
+						e2enetwork.UnblockNetwork(host, instanceAddress)
 					}
 
 					if ginkgo.CurrentGinkgoTestDescription().Failed {
@@ -610,8 +610,8 @@ var _ = SIGDescribe("Network Partition [Disruptive] [Slow]", func() {
 					expectNodeReadiness(true, newNode)
 				}()
 
-				for _, masterAddress := range masterAddresses {
-					framework.BlockNetwork(host, masterAddress)
+				for _, instanceAddress := range controlPlaneAddresses {
+					e2enetwork.BlockNetwork(host, instanceAddress)
 				}
 
 				ginkgo.By("Expect to observe node and pod status change from Ready to NotReady after network partition")

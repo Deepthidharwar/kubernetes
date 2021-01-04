@@ -386,7 +386,7 @@ func testWebhookReinvocationPolicy(t *testing.T, watchCache bool) {
 				t.Fatal(err)
 			}
 			defer func() {
-				err := client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().Delete(context.TODO(), cfg.GetName(), &metav1.DeleteOptions{})
+				err := client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().Delete(context.TODO(), cfg.GetName(), metav1.DeleteOptions{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -447,11 +447,9 @@ func testWebhookReinvocationPolicy(t *testing.T, watchCache bool) {
 				}
 			}
 
-			if tt.expectInvocations != nil {
-				for k, v := range tt.expectInvocations {
-					if recorder.GetCount(k) != v {
-						t.Errorf("expected %d invocations of %s, but got %d", v, k, recorder.GetCount(k))
-					}
+			for k, v := range tt.expectInvocations {
+				if recorder.GetCount(k) != v {
+					t.Errorf("expected %d invocations of %s, but got %d", v, k, recorder.GetCount(k))
 				}
 			}
 

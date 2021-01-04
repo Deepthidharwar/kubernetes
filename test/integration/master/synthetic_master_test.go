@@ -48,7 +48,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	clienttypedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	restclient "k8s.io/client-go/rest"
-	"k8s.io/kubernetes/pkg/master"
+	"k8s.io/kubernetes/pkg/controlplane"
 	"k8s.io/kubernetes/test/integration"
 	"k8s.io/kubernetes/test/integration/framework"
 )
@@ -143,13 +143,13 @@ func TestEmptyList(t *testing.T) {
 	}
 }
 
-func initStatusForbiddenMasterCongfig() *master.Config {
+func initStatusForbiddenMasterCongfig() *controlplane.Config {
 	masterConfig := framework.NewIntegrationTestMasterConfig()
 	masterConfig.GenericConfig.Authorization.Authorizer = authorizerfactory.NewAlwaysDenyAuthorizer()
 	return masterConfig
 }
 
-func initUnauthorizedMasterCongfig() *master.Config {
+func initUnauthorizedMasterCongfig() *controlplane.Config {
 	masterConfig := framework.NewIntegrationTestMasterConfig()
 	tokenAuthenticator := tokentest.New()
 	tokenAuthenticator.Tokens[AliceToken] = &user.DefaultInfo{Name: "alice", UID: "1"}
@@ -162,7 +162,7 @@ func initUnauthorizedMasterCongfig() *master.Config {
 func TestStatus(t *testing.T) {
 	testCases := []struct {
 		name         string
-		masterConfig *master.Config
+		masterConfig *controlplane.Config
 		statusCode   int
 		reqPath      string
 		reason       string
@@ -702,7 +702,7 @@ func TestServiceAlloc(t *testing.T) {
 	}
 
 	// Delete the first service.
-	if err := client.CoreV1().Services(metav1.NamespaceDefault).Delete(context.TODO(), svc(1).ObjectMeta.Name, nil); err != nil {
+	if err := client.CoreV1().Services(metav1.NamespaceDefault).Delete(context.TODO(), svc(1).ObjectMeta.Name, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("got unexpected error: %v", err)
 	}
 
@@ -736,7 +736,7 @@ func TestUpdateNodeObjects(t *testing.T) {
 	iterations := 10000
 
 	for i := 0; i < nodes*6; i++ {
-		c.Nodes().Delete(context.TODO(), fmt.Sprintf("node-%d", i), nil)
+		c.Nodes().Delete(context.TODO(), fmt.Sprintf("node-%d", i), metav1.DeleteOptions{})
 		_, err := c.Nodes().Create(context.TODO(), &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: fmt.Sprintf("node-%d", i),

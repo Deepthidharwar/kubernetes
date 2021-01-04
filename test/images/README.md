@@ -11,9 +11,16 @@ new images, test the changes made, promote the newly built staging images.
 
 ## Prerequisites
 
-In order to build the docker test images, a Linux node is required. The node will require `make`
-and `docker (version 18.06.0 or newer)`. Manifest lists were introduced in 18.03.0, but 18.06.0
-is recommended in order to avoid certain issues.
+In order to build the docker test images, a Linux node is required. The node will require `make`,
+`docker (version 19.03.0 or newer)`, and ``docker buildx``, which will be used to build multiarch
+images, as well as Windows images. In order to properly build multiarch and Windows images, some
+initialization is required:
+
+```shell
+docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+docker buildx create --name img-builder --use
+docker buildx inspect --bootstrap
+```
 
 The node must be able to push the images to the desired container registry, make sure you are
 authenticated with the registry you're pushing to.
@@ -62,6 +69,41 @@ For this, you will need the image manifest list's digest, which can be obtained 
 ```bash
 manifest-tool inspect --raw gcr.io/k8s-staging-e2e-test-images/${IMAGE_NAME}:${VERSION} | jq '.[0].Digest'
 ```
+
+The images are built through `make`. Since some images (e.g.: `busybox`) are used as a base for
+other images, it is recommended to build them first, if needed.
+
+
+### Windows test images considerations
+
+Ideally, the same `Dockerfile` can be used to build both Windows and Linux images. However, that isn't
+always possible. If a different `Dockerfile` is needed for an image, it should be named `Dockerfile_windows`.
+When building, `image-util.sh` will first check for this file name when building Windows images.
+
+The building process uses `docker buildx` to build both Windows and Linux images, but there are a few
+limitations when it comes to the Windows images:
+
+- The Dockerfile can have multiple stages, including Windows and Linux stages for the same image, but
+  the Windows stage cannot have any `RUN` commands (see the agnhost's `Dockerfile_windows` as an example).
+- The Windows stage cannot have any `WORKDIR` commands due to a bug (https://github.com/docker/buildx/issues/378)
+- When copying Windows symlink files to a Windows image, `docker buildx` changes the symlink target,
+  prepending `Files\` to them (https://github.com/docker/buildx/issues/373) (for example, the symlink
+  target `C:\bin\busybox.exe` becomes `Files\C:\bin\busybox.exe`). This can be avoided by having symlink
+  targets with relative paths and having the target duplicated (for example, the symlink target
+  `busybox.exe` becomes `Files\busybox.exe` when copied, so the binary `C:\bin\Files\busybox.exe`
+  should exist in order for the symlink to be used correctly). See the busybox's `Dockerfile_windows` as
+  an example.
+- `docker buildx` overwrites the image's PATH environment variable to a Linux PATH environment variable,
+  which won't work properly on Windows. See https://github.com/moby/buildkit/issues/1560
+- The base image for all the Windows images is nanoserver, which is ~10 times smaller than Windows Servercore.
+  Most binaries added to the image will work out of the box, but some will not due to missing dependencies
+  (**atention**: the image will still build successfully, even if the added binaries will not work).
+  For example, `coredns.exe` requires `netapi32.dll`, which cannot be found on a nanoserver image, but
+  we can copy it from a servercore image (see the agnhost image's `Dockerfile_windows` file as an example).
+  A good rule of thumb is to use 64-bit applications instead of 32-bit as they have fewer dependencies.
+  You can determine what dependencies are missing by running `procmon.exe` on the container's host
+  (make sure that process isolation is used, not Hyper-V isolation).
+  [This](https://stefanscherer.github.io/find-dependencies-in-windows-containers/) is a useful guide on how to use `procmon.exe`.
 
 
 ## Building images

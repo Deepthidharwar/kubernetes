@@ -26,7 +26,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/component-base/metrics/testutil"
-	statsapi "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
+	statsapi "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 )
 
 type mockSummaryProvider struct {
@@ -47,10 +47,12 @@ func TestCollectResourceMetrics(t *testing.T) {
 	testTime := metav1.NewTime(time.Unix(2, 0)) // a static timestamp: 2000
 	interestedMetrics := []string{
 		"scrape_error",
-		"node_cpu_usage_seconds",
+		"node_cpu_usage_seconds_total",
 		"node_memory_working_set_bytes",
-		"container_cpu_usage_seconds",
+		"container_cpu_usage_seconds_total",
 		"container_memory_working_set_bytes",
+		"pod_cpu_usage_seconds_total",
+		"pod_memory_working_set_bytes",
 	}
 
 	tests := []struct {
@@ -85,9 +87,9 @@ func TestCollectResourceMetrics(t *testing.T) {
 			},
 			summaryErr: nil,
 			expectedMetrics: `
-				# HELP node_cpu_usage_seconds [ALPHA] Cumulative cpu time consumed by the node in core-seconds
-				# TYPE node_cpu_usage_seconds gauge
-				node_cpu_usage_seconds 10 2000
+				# HELP node_cpu_usage_seconds_total [ALPHA] Cumulative cpu time consumed by the node in core-seconds
+				# TYPE node_cpu_usage_seconds_total counter
+				node_cpu_usage_seconds_total 10 2000
 				# HELP node_memory_working_set_bytes [ALPHA] Current working set of the node in bytes
 				# TYPE node_memory_working_set_bytes gauge
 				node_memory_working_set_bytes 1000 2000
@@ -156,16 +158,49 @@ func TestCollectResourceMetrics(t *testing.T) {
 				# HELP scrape_error [ALPHA] 1 if there was an error while getting container metrics, 0 otherwise
 				# TYPE scrape_error gauge
 				scrape_error 0
-				# HELP container_cpu_usage_seconds [ALPHA] Cumulative cpu time consumed by the container in core-seconds
-				# TYPE container_cpu_usage_seconds gauge
-				container_cpu_usage_seconds{container="container_a",namespace="namespace_a",pod="pod_a"} 10 2000
-				container_cpu_usage_seconds{container="container_a",namespace="namespace_b",pod="pod_b"} 10 2000
-				container_cpu_usage_seconds{container="container_b",namespace="namespace_a",pod="pod_a"} 10 2000
+				# HELP container_cpu_usage_seconds_total [ALPHA] Cumulative cpu time consumed by the container in core-seconds
+				# TYPE container_cpu_usage_seconds_total counter
+				container_cpu_usage_seconds_total{container="container_a",namespace="namespace_a",pod="pod_a"} 10 2000
+				container_cpu_usage_seconds_total{container="container_a",namespace="namespace_b",pod="pod_b"} 10 2000
+				container_cpu_usage_seconds_total{container="container_b",namespace="namespace_a",pod="pod_a"} 10 2000
 				# HELP container_memory_working_set_bytes [ALPHA] Current working set of the container in bytes
 				# TYPE container_memory_working_set_bytes gauge
 				container_memory_working_set_bytes{container="container_a",namespace="namespace_a",pod="pod_a"} 1000 2000
 				container_memory_working_set_bytes{container="container_a",namespace="namespace_b",pod="pod_b"} 1000 2000
 				container_memory_working_set_bytes{container="container_b",namespace="namespace_a",pod="pod_a"} 1000 2000
+			`,
+		},
+		{
+			name: "arbitrary pod metrics",
+			summary: &statsapi.Summary{
+				Pods: []statsapi.PodStats{
+					{
+						PodRef: statsapi.PodReference{
+							Name:      "pod_a",
+							Namespace: "namespace_a",
+						},
+						CPU: &statsapi.CPUStats{
+							Time:                 testTime,
+							UsageCoreNanoSeconds: uint64Ptr(10000000000),
+						},
+						Memory: &statsapi.MemoryStats{
+							Time:            testTime,
+							WorkingSetBytes: uint64Ptr(1000),
+						},
+					},
+				},
+			},
+			summaryErr: nil,
+			expectedMetrics: `
+				# HELP scrape_error [ALPHA] 1 if there was an error while getting container metrics, 0 otherwise
+				# TYPE scrape_error gauge
+				scrape_error 0
+				# HELP pod_cpu_usage_seconds_total [ALPHA] Cumulative cpu time consumed by the pod in core-seconds
+				# TYPE pod_cpu_usage_seconds_total counter
+				pod_cpu_usage_seconds_total{namespace="namespace_a",pod="pod_a"} 10 2000
+				# HELP pod_memory_working_set_bytes [ALPHA] Current working set of the pod in bytes
+				# TYPE pod_memory_working_set_bytes gauge
+				pod_memory_working_set_bytes{namespace="namespace_a",pod="pod_a"} 1000 2000
 			`,
 		},
 	}

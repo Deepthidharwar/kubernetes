@@ -19,18 +19,19 @@ package metaproxier
 import (
 	"fmt"
 
-	"k8s.io/api/core/v1"
-	"k8s.io/klog"
+	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1beta1"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/proxy"
 	"k8s.io/kubernetes/pkg/proxy/config"
 
 	utilnet "k8s.io/utils/net"
-
-	discovery "k8s.io/api/discovery/v1beta1"
 )
 
 type metaProxier struct {
+	// actual, wrapped
 	ipv4Proxier proxy.Provider
+	// actual, wrapped
 	ipv6Proxier proxy.Provider
 	// TODO(imroc): implement node handler for meta proxier.
 	config.NoopNodeHandler
@@ -62,33 +63,23 @@ func (proxier *metaProxier) SyncLoop() {
 
 // OnServiceAdd is called whenever creation of new service object is observed.
 func (proxier *metaProxier) OnServiceAdd(service *v1.Service) {
-	if *(service.Spec.IPFamily) == v1.IPv4Protocol {
-		proxier.ipv4Proxier.OnServiceAdd(service)
-		return
-	}
+	proxier.ipv4Proxier.OnServiceAdd(service)
 	proxier.ipv6Proxier.OnServiceAdd(service)
 }
 
 // OnServiceUpdate is called whenever modification of an existing
 // service object is observed.
 func (proxier *metaProxier) OnServiceUpdate(oldService, service *v1.Service) {
-	// IPFamily is immutable, hence we only need to check on the new service
-	if *(service.Spec.IPFamily) == v1.IPv4Protocol {
-		proxier.ipv4Proxier.OnServiceUpdate(oldService, service)
-		return
-	}
-
+	proxier.ipv4Proxier.OnServiceUpdate(oldService, service)
 	proxier.ipv6Proxier.OnServiceUpdate(oldService, service)
 }
 
 // OnServiceDelete is called whenever deletion of an existing service
 // object is observed.
 func (proxier *metaProxier) OnServiceDelete(service *v1.Service) {
-	if *(service.Spec.IPFamily) == v1.IPv4Protocol {
-		proxier.ipv4Proxier.OnServiceDelete(service)
-		return
-	}
+	proxier.ipv4Proxier.OnServiceDelete(service)
 	proxier.ipv6Proxier.OnServiceDelete(service)
+
 }
 
 // OnServiceSynced is called once all the initial event handlers were
@@ -103,7 +94,7 @@ func (proxier *metaProxier) OnServiceSynced() {
 func (proxier *metaProxier) OnEndpointsAdd(endpoints *v1.Endpoints) {
 	ipFamily, err := endpointsIPFamily(endpoints)
 	if err != nil {
-		klog.Warningf("failed to add endpoints %s/%s with error %v", endpoints.ObjectMeta.Namespace, endpoints.ObjectMeta.Name, err)
+		klog.V(4).Infof("failed to add endpoints %s/%s with error %v", endpoints.ObjectMeta.Namespace, endpoints.ObjectMeta.Name, err)
 		return
 	}
 	if *ipFamily == v1.IPv4Protocol {
@@ -118,7 +109,7 @@ func (proxier *metaProxier) OnEndpointsAdd(endpoints *v1.Endpoints) {
 func (proxier *metaProxier) OnEndpointsUpdate(oldEndpoints, endpoints *v1.Endpoints) {
 	ipFamily, err := endpointsIPFamily(endpoints)
 	if err != nil {
-		klog.Warningf("failed to update endpoints %s/%s with error %v", endpoints.ObjectMeta.Namespace, endpoints.ObjectMeta.Name, err)
+		klog.V(4).Infof("failed to update endpoints %s/%s with error %v", endpoints.ObjectMeta.Namespace, endpoints.ObjectMeta.Name, err)
 		return
 	}
 
@@ -134,7 +125,7 @@ func (proxier *metaProxier) OnEndpointsUpdate(oldEndpoints, endpoints *v1.Endpoi
 func (proxier *metaProxier) OnEndpointsDelete(endpoints *v1.Endpoints) {
 	ipFamily, err := endpointsIPFamily(endpoints)
 	if err != nil {
-		klog.Warningf("failed to delete endpoints %s/%s with error %v", endpoints.ObjectMeta.Namespace, endpoints.ObjectMeta.Name, err)
+		klog.V(4).Infof("failed to delete endpoints %s/%s with error %v", endpoints.ObjectMeta.Namespace, endpoints.ObjectMeta.Name, err)
 		return
 	}
 
@@ -151,8 +142,6 @@ func (proxier *metaProxier) OnEndpointsSynced() {
 	proxier.ipv4Proxier.OnEndpointsSynced()
 	proxier.ipv6Proxier.OnEndpointsSynced()
 }
-
-// TODO: (khenidak) implement EndpointSlice handling
 
 // OnEndpointSliceAdd is called whenever creation of a new endpoint slice object
 // is observed.
